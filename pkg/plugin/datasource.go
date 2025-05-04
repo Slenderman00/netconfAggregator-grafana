@@ -80,30 +80,44 @@ func (d *Datasource) QueryData(ctx context.Context, req *backend.QueryDataReques
 			continue
 		}
 
+		// Create a data frame
 		frame := data.NewFrame("response")
-		timestamps := []time.Time{}
+		
+		// Prepare slices for timestamps and values
+		timestamps := make([]time.Time, 0, len(deviceData))
 		var values interface{}
-
-		if qm.Type == "int" {
-			values = []int64{}
-		} else if qm.Type == "contains" {
-			values = []bool{}
-		} else {
+		
+		switch qm.Type {
+		case "int":
+			intValues := make([]int64, 0, len(deviceData))
+			for _, item := range deviceData {
+				timestamp, _ := time.Parse(time.RFC3339, item["timestamp"].(string))
+				timestamps = append(timestamps, timestamp)
+				intValues = append(intValues, int64(item["value"].(int)))
+			}
+			values = intValues
+		case "contains":
+			boolValues := make([]bool, 0, len(deviceData))
+			for _, item := range deviceData {
+				timestamp, _ := time.Parse(time.RFC3339, item["timestamp"].(string))
+				timestamps = append(timestamps, timestamp)
+				boolValues = append(boolValues, item["value"].(bool))
+			}
+			values = boolValues
+		case "str":
+			strValues := make([]string, 0, len(deviceData))
+			for _, item := range deviceData {
+				timestamp, _ := time.Parse(time.RFC3339, item["timestamp"].(string))
+				timestamps = append(timestamps, timestamp)
+				strValues = append(strValues, item["value"].(string))
+			}
+			values = strValues
+		default:
 			response.Responses[q.RefID] = backend.ErrDataResponse(backend.StatusBadRequest, fmt.Sprintf("unsupported query type: %s", qm.Type))
 			continue
 		}
 
-		for _, item := range deviceData {
-			timestamp, _ := time.Parse(time.RFC3339, item["timestamp"].(string))
-			timestamps = append(timestamps, timestamp)
-
-			if qm.Type == "int" {
-				values = append(values.([]int64), int64(item["value"].(int)))
-			} else if qm.Type == "contains" {
-				values = append(values.([]bool), item["value"].(bool))
-			}
-		}
-
+		// Add fields to the frame after collecting all data
 		frame.Fields = append(frame.Fields,
 			data.NewField("time", nil, timestamps),
 			data.NewField("value", nil, values),
@@ -194,22 +208,27 @@ func (d *DeviceDataFetcher) GetDeviceData(deviceID string, xpathQuery string, qt
 
 		// Process based on query type
 		switch qtype {
-		case "int":
-			// Extract the first integer from the XML
-			firstInteger := extractFirstInteger(xmlData)
-			processedData = append(processedData, map[string]interface{}{
-				"timestamp": item["timestamp"],
-				"value":     firstInteger,
-			})
-		case "contains":
-			// Check if the XML contains the query string and return true/false
-			contains := strings.Contains(xmlData, qstring)
-			processedData = append(processedData, map[string]interface{}{
-				"timestamp": item["timestamp"],
-				"value":     contains,
-			})
-		default:
-			return nil, fmt.Errorf("unsupported query type: %s", qtype)
+			case "int":
+				// Extract the first integer from the XML
+				firstInteger := extractFirstInteger(xmlData)
+				processedData = append(processedData, map[string]interface{}{
+					"timestamp": item["timestamp"],
+					"value":     firstInteger,
+				})
+			case "contains":
+				// Check if the XML contains the query string and return true/false
+				contains := strings.Contains(xmlData, qstring)
+				processedData = append(processedData, map[string]interface{}{
+					"timestamp": item["timestamp"],
+					"value":     contains,
+				})
+			case "str":				
+				processedData = append(processedData, map[string]interface{}{
+					"timestamp": item["timestamp"],
+					"value":     xmlData,
+				})
+			default:
+				return nil, fmt.Errorf("unsupported query type: %s", qtype)
 		}
 	}
 

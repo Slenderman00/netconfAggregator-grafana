@@ -85,6 +85,7 @@ export function QueryEditor({ query, onChange, onRunQuery, datasource }: Props) 
             options={[
               { label: 'Integer (int)', value: 'int' },
               { label: 'Contains (string)', value: 'contains' },
+              { label: 'String', value: 'str' }
             ]}
             value={type || ''}
             onChange={(e) => onTypeChange(e.value)}
