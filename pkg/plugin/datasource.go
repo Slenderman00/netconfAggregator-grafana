@@ -1,11 +1,14 @@
 package plugin
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
 	"io"
 	"net/http"
+	"regexp"
+	"strconv"
 	"strings"
 	"time"
 
@@ -59,25 +62,176 @@ func (d *Datasource) Dispose() {
 // The QueryDataResponse contains a map of RefID to the response for each query, and each response
 // contains Frames ([]*Frame).
 func (d *Datasource) QueryData(ctx context.Context, req *backend.QueryDataRequest) (*backend.QueryDataResponse, error) {
-	// create response struct
+	// Create response struct
 	response := backend.NewQueryDataResponse()
-
-	// loop over queries and execute them individually.
+	// Loop over queries and execute them individually
 	for _, q := range req.Queries {
-		res := d.query(ctx, req.PluginContext, q)
+		var qm queryModel
+		err := json.Unmarshal(q.JSON, &qm)
+		if err != nil {
+			response.Responses[q.RefID] = backend.ErrDataResponse(backend.StatusBadRequest, fmt.Sprintf("json unmarshal: %v", err.Error()))
+			continue
+		}
 
-		// save the response in a hashmap
-		// based on with RefID as identifier
-		response.Responses[q.RefID] = res
+		dataFetcher := DeviceDataFetcher{Address: d.config.Address}
+		deviceData, err := dataFetcher.GetDeviceData(qm.Device, qm.QueryText, qm.Type, qm.ContainsString)
+		if err != nil {
+			response.Responses[q.RefID] = backend.ErrDataResponse(backend.StatusInternal, fmt.Sprintf("data fetch error: %v", err.Error()))
+			continue
+		}
+
+		frame := data.NewFrame("response")
+		timestamps := []time.Time{}
+		var values interface{}
+
+		if qm.Type == "int" {
+			values = []int64{}
+		} else if qm.Type == "contains" {
+			values = []bool{}
+		} else {
+			response.Responses[q.RefID] = backend.ErrDataResponse(backend.StatusBadRequest, fmt.Sprintf("unsupported query type: %s", qm.Type))
+			continue
+		}
+
+		for _, item := range deviceData {
+			timestamp, _ := time.Parse(time.RFC3339, item["timestamp"].(string))
+			timestamps = append(timestamps, timestamp)
+
+			if qm.Type == "int" {
+				values = append(values.([]int64), int64(item["value"].(int)))
+			} else if qm.Type == "contains" {
+				values = append(values.([]bool), item["value"].(bool))
+			}
+		}
+
+		frame.Fields = append(frame.Fields,
+			data.NewField("time", nil, timestamps),
+			data.NewField("value", nil, values),
+		)
+
+		response.Responses[q.RefID] = backend.DataResponse{
+			Frames: []*data.Frame{frame},
+		}
 	}
-
 	return response, nil
 }
 
+type DeviceDataFetcher struct {
+	Address string
+}
+
+func (d *DeviceDataFetcher) GetDeviceData(deviceID string, xpathQuery string, qtype string, qstring string) ([]map[string]interface{}, error) {
+	
+	if d.Address == "" {
+		return nil, fmt.Errorf("datasource address is not configured")
+	}
+
+	if !strings.HasPrefix(d.Address, "http://") && !strings.HasPrefix(d.Address, "https://") {
+		return nil, fmt.Errorf("datasource address must include http:// or https://")
+	}
+
+	if deviceID == "" {
+		return nil, fmt.Errorf("device ID is required")
+	}
+
+	if xpathQuery == "" {
+		return nil, fmt.Errorf("xpathQuery is required")
+	}
+
+	deviceDataURL := fmt.Sprintf("%s/timeseries/%s", d.Address, deviceID)
+	body := map[string]string{"xpathQuery": xpathQuery}
+	bodyBytes, err := json.Marshal(body)
+
+	if err != nil {
+		return nil, fmt.Errorf("failed to marshal request body: %w", err)
+	}
+
+	reqBody := bytes.NewReader(bodyBytes)
+	request, err := http.NewRequest("POST", deviceDataURL, reqBody)
+
+	if err != nil {
+		return nil, fmt.Errorf("failed to create HTTP request: %w", err)
+	}
+	
+	request.Header.Set("Accept", "*/*")
+	request.Header.Set("Accept-Encoding", "gzip, deflate, br")
+	request.Header.Set("Connection", "keep-alive")
+	request.Header.Set("Content-Type", "application/json")
+
+	client := &http.Client{
+		Timeout: 10 * time.Second,
+	}
+
+	resp, err := client.Do(request)
+	if err != nil {
+		return nil, fmt.Errorf("failed to fetch device data: %w", err)
+	}
+
+	defer resp.Body.Close()
+	responseBody, err := io.ReadAll(resp.Body)
+
+	if err != nil {
+		return nil, fmt.Errorf("failed to read response: %w", err)
+	}
+
+	if resp.StatusCode != http.StatusOK {
+		return nil, fmt.Errorf("API returned status %d: %s", resp.StatusCode, string(responseBody))
+	}
+
+	// Parse the response to process based on query type
+	var responseData []map[string]interface{}
+	err = json.Unmarshal(responseBody, &responseData)
+	if err != nil {
+		return nil, fmt.Errorf("failed to parse response JSON: %w", err)
+	}
+
+	var processedData []map[string]interface{}
+	for _, item := range responseData {
+		xmlData, ok := item["xml"].(string)
+		if !ok {
+			continue
+		}
+
+		// Process based on query type
+		switch qtype {
+		case "int":
+			// Extract the first integer from the XML
+			firstInteger := extractFirstInteger(xmlData)
+			processedData = append(processedData, map[string]interface{}{
+				"timestamp": item["timestamp"],
+				"value":     firstInteger,
+			})
+		case "contains":
+			// Check if the XML contains the query string and return true/false
+			contains := strings.Contains(xmlData, qstring)
+			processedData = append(processedData, map[string]interface{}{
+				"timestamp": item["timestamp"],
+				"value":     contains,
+			})
+		default:
+			return nil, fmt.Errorf("unsupported query type: %s", qtype)
+		}
+	}
+	
+	return processedData, nil
+}
+
+// Helper function to extract the first integer from a string
+func extractFirstInteger(input string) int {
+	re := regexp.MustCompile(`\d+`)
+	match := re.FindString(input)
+	if match == "" {
+		return 0 // Return 0 if no integer is found
+	}
+	intValue, _ := strconv.Atoi(match)
+	return intValue
+}
+
 type queryModel struct {
-	QueryText string `json:"queryText"`
-	Constant  float64 `json:"constant"`
-	Device    string `json:"device"`
+	Type           string `json:"type"`
+	ContainsString string `json:"containsString"`
+	QueryText      string `json:"xpath"`
+	Device         string `json:"device"`
 }
 
 func (d *Datasource) query(_ context.Context, pCtx backend.PluginContext, query backend.DataQuery) backend.DataResponse {
@@ -156,6 +310,7 @@ func (d *Datasource) CallResource(ctx context.Context, req *backend.CallResource
 		backend.Logger.Debug("Calling getDevices handler")
 		return d.getDevices(ctx, req, sender)
 	}
+
 	backend.Logger.Debug("Resource not found", "path", req.Path)
 	return sender.Send(&backend.CallResourceResponse{
 		Status: http.StatusNotFound,
@@ -184,9 +339,9 @@ func (d *Datasource) getDevices(ctx context.Context, req *backend.CallResourceRe
 			Body:   []byte(`{"error": "Datasource address must include http:// or https://"}`),
 		})
 	}
-	
+
 	devicesURL := fmt.Sprintf("%s/devices", d.config.Address)
-	
+
 	// Make the request
 	resp, err := client.Get(devicesURL)
 	if err != nil {
@@ -196,7 +351,7 @@ func (d *Datasource) getDevices(ctx context.Context, req *backend.CallResourceRe
 		})
 	}
 	defer resp.Body.Close()
-	
+
 	// Read the response body
 	body, err := io.ReadAll(resp.Body)
 	if err != nil {
@@ -213,7 +368,7 @@ func (d *Datasource) getDevices(ctx context.Context, req *backend.CallResourceRe
 			Body:   []byte(fmt.Sprintf(`{"error": "API returned status %d: %s"}`, resp.StatusCode, body)),
 		})
 	}
-	
+
 	// The response body should already be in the correct JSON format
 	// Just pass it through
 

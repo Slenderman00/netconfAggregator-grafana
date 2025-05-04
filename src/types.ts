@@ -2,14 +2,11 @@ import { DataSourceJsonData } from '@grafana/data';
 import { DataQuery } from '@grafana/schema';
 
 export interface Query extends DataQuery {
-  queryText?: string;
-  constant: number;
+  xpath?: string;
   device: string;
+  type: string;
+  containsString?: string;
 }
-
-export const DEFAULT_QUERY: Partial<Query> = {
-  constant: 6.5,
-};
 
 export interface DataPoint {
   Time: number;
