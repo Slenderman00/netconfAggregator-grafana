@@ -212,7 +212,7 @@ func (d *DeviceDataFetcher) GetDeviceData(deviceID string, xpathQuery string, qt
 			return nil, fmt.Errorf("unsupported query type: %s", qtype)
 		}
 	}
-	
+
 	return processedData, nil
 }
 
@@ -283,12 +283,6 @@ func (d *Datasource) CheckHealth(_ context.Context, req *backend.CheckHealthRequ
 		res.Message = "Address is missing"
 		return res, nil
 	}
-
-	//if config.Secrets.ApiKey == "" {
-	//	res.Status = backend.HealthStatusError
-	//	res.Message = "API key is missing"
-	//	return res, nil
-	//}
 
 	return &backend.CheckHealthResult{
 		Status:  backend.HealthStatusOk,
