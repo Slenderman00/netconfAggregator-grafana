@@ -73,8 +73,13 @@ func (d *Datasource) QueryData(ctx context.Context, req *backend.QueryDataReques
 			continue
 		}
 
+		timeRange := q.TimeRange
+		from := timeRange.From.Format(time.RFC3339)
+		to := timeRange.To.Format(time.RFC3339)
+
 		dataFetcher := DeviceDataFetcher{Address: d.config.Address}
-		deviceData, err := dataFetcher.GetDeviceData(qm.Device, qm.QueryText, qm.Type, qm.ContainsString)
+
+		deviceData, err := dataFetcher.GetDeviceData(qm.Device, qm.QueryText, qm.Type, qm.ContainsString, from, to)
 		if err != nil {
 			response.Responses[q.RefID] = backend.ErrDataResponse(backend.StatusInternal, fmt.Sprintf("data fetch error: %v", err.Error()))
 			continue
@@ -134,7 +139,7 @@ type DeviceDataFetcher struct {
 	Address string
 }
 
-func (d *DeviceDataFetcher) GetDeviceData(deviceID string, xpathQuery string, qtype string, qstring string) ([]map[string]interface{}, error) {
+func (d *DeviceDataFetcher) GetDeviceData(deviceID string, xpathQuery string, qtype string, qstring string, from string, to string) ([]map[string]interface{}, error) {
 	
 	if d.Address == "" {
 		return nil, fmt.Errorf("datasource address is not configured")
@@ -153,7 +158,12 @@ func (d *DeviceDataFetcher) GetDeviceData(deviceID string, xpathQuery string, qt
 	}
 
 	deviceDataURL := fmt.Sprintf("%s/timeseries/%s", d.Address, deviceID)
-	body := map[string]string{"xpathQuery": xpathQuery}
+	body := map[string]string{
+		"xpathQuery": xpathQuery,
+		"from": from,
+		"to": to,
+	}
+	
 	bodyBytes, err := json.Marshal(body)
 
 	if err != nil {
